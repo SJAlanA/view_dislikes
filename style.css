@@ -1,3 +1,13 @@
-.dislike-count {
-    color: #aaa;
+/* Return YouTube Dislike — injected styles */
+
+.ryd-dislike-count {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--yt-spec-text-secondary, #aaa);
+    line-height: 1;
+    transition: color 0.2s ease;
+    white-space: nowrap;
 }
