@@ -1,13 +1,13 @@
 /* Return YouTube Dislike — injected styles */
 
+/*
+  The count renders inside the <button> element as a sibling of the icon div,
+  using YouTube's own .yt-spec-button-shape-next__button-text-content class
+  for consistent font/spacing. We only need to ensure it doesn't interfere.
+*/
 .ryd-dislike-count {
-    display: inline-flex;
-    align-items: center;
-    margin-left: 6px;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--yt-spec-text-secondary, #aaa);
-    line-height: 1;
-    transition: color 0.2s ease;
-    white-space: nowrap;
+    /* No extra styling needed — YT's own text-content class handles everything.
+       Override only if the count needs visual distinction. */
+    pointer-events: none;
+    /* Clicks pass through to the button */
 }

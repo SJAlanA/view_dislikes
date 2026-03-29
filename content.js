@@ -1,7 +1,8 @@
 // ── Return YouTube Dislike — content.js ──────────────────────────────────────
 
 const API_BASE = "https://returnyoutubedislikeapi.com/votes?videoId=";
-const SPAN_CLASS = "ryd-dislike-count";
+const COUNT_CLASS = "ryd-dislike-count";
+const TEXT_CLASS = "yt-spec-button-shape-next__button-text-content";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -12,8 +13,8 @@ function getVideoId() {
 
 function formatCount(n) {
     if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
-    if (n >= 1_000_000)     return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-    if (n >= 1_000)         return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
     return n.toLocaleString();
 }
 
@@ -30,33 +31,31 @@ async function fetchDislikes(videoId) {
 }
 
 // ── Find the dislike button robustly ─────────────────────────────────────────
-// Strategy: look for a button whose aria-label contains "dislike" (case-insensitive).
-// Falls back to the second ytd-toggle-button-renderer for older YouTube layouts.
+// Primary: dislike-button-view-model is a stable custom element in YouTube's
+// modern segmented like/dislike UI. Fallback to aria-label search.
 
 function findDislikeButton() {
-    // Modern layout: segmented like/dislike renderer
-    const segmented = document.querySelector("ytd-segmented-like-dislike-button-renderer");
-    if (segmented) {
-        const buttons = segmented.querySelectorAll("button");
-        for (const btn of buttons) {
-            const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-            if (label.includes("dislike")) return btn;
-        }
+    // ✅ Most reliable: the custom element wrapping the dislike button
+    const dislikeVM = document.querySelector("dislike-button-view-model");
+    if (dislikeVM) {
+        const btn = dislikeVM.querySelector("button");
+        if (btn) return btn;
     }
 
-    // Any button on the page with an aria-label containing "dislike"
+    // Fallback: any button whose aria-label contains "dislike"
     const allButtons = document.querySelectorAll("button");
     for (const btn of allButtons) {
         const label = (btn.getAttribute("aria-label") || "").toLowerCase();
         if (label.includes("dislike") && !label.includes("not interested")) return btn;
     }
 
-    // Legacy fallback: second ytd-toggle-button-renderer
-    const toggles = document.querySelectorAll("ytd-toggle-button-renderer");
-    return toggles.length >= 2 ? toggles[1] : null;
+    return null;
 }
 
-// ── Inject / update the count span ───────────────────────────────────────────
+// ── Inject the count inside the button ───────────────────────────────────────
+// The dislike button starts as --icon-button (icon-only, no text).
+// We swap it to --icon-leading (icon + text) to match the like button layout,
+// then insert a text-content div inside the <button> element itself.
 
 async function insertDislikeCount(videoId) {
     const dislikes = await fetchDislikes(videoId);
@@ -75,17 +74,26 @@ async function insertDislikeCount(videoId) {
         return;
     }
 
-    // Find or create the count span, placed right after the button's text node
-    let span = document.querySelector(`.${SPAN_CLASS}`);
-    if (!span) {
-        span = document.createElement("span");
-        span.className = SPAN_CLASS;
-        // Insert after the button so it sits alongside the dislike icon
-        button.parentElement.insertBefore(span, button.nextSibling);
+    // Switch the button from icon-only to icon+text so it has room to show the count
+    button.classList.replace(
+        "yt-spec-button-shape-next--icon-button",
+        "yt-spec-button-shape-next--icon-leading"
+    );
+
+    // Find or create the count div INSIDE the button (before touch-feedback)
+    let countDiv = button.querySelector(`.${COUNT_CLASS}`);
+    if (!countDiv) {
+        countDiv = document.createElement("div");
+        // Use YouTube's own text-content class so font/spacing matches the like count
+        countDiv.className = `${TEXT_CLASS} ${COUNT_CLASS}`;
+
+        // Insert before the touch-feedback shape (last child), after the icon div
+        const touchFeedback = button.querySelector("yt-touch-feedback-shape");
+        button.insertBefore(countDiv, touchFeedback || null);
     }
 
-    span.textContent = formatCount(dislikes);
-    span.title = `${dislikes.toLocaleString()} dislikes`;
+    countDiv.textContent = formatCount(dislikes);
+    button.title = `${dislikes.toLocaleString()} dislikes`;
 }
 
 // ── SPA Navigation Watcher ────────────────────────────────────────────────────
@@ -101,8 +109,16 @@ function handleNavigation() {
 
     lastVideoId = videoId;
 
-    // Remove any stale count from the previous video
-    document.querySelectorAll(`.${SPAN_CLASS}`).forEach(el => el.remove());
+    // Remove any stale count from the previous video and restore the button class
+    document.querySelectorAll(`.${COUNT_CLASS}`).forEach(el => el.remove());
+    const prevBtn = findDislikeButton();
+    if (prevBtn) {
+        prevBtn.classList.replace(
+            "yt-spec-button-shape-next--icon-leading",
+            "yt-spec-button-shape-next--icon-button"
+        );
+        prevBtn.title = "";
+    }
 
     // Wait a tick for the new video's DOM to settle, then inject
     setTimeout(() => insertDislikeCount(videoId), 800);
