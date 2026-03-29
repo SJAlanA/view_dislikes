@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Dislike Viewer",
+  "version": "1.0",
+  "description": "Shows dislike count on YouTube videos",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://www.youtube.com/*", "https://returnyoutubedislikeapi.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/watch*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
