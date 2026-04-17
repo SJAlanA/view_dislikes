@@ -1,141 +1,181 @@
 // ── Return YouTube Dislike — content.js ──────────────────────────────────────
+// Based on the approach used by the official Return YouTube Dislike extension.
 
 const API_BASE = "https://returnyoutubedislikeapi.com/votes?videoId=";
-const COUNT_CLASS = "ryd-dislike-count";
-const TEXT_CLASS = "yt-spec-button-shape-next__button-text-content";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getVideoId() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("v") || null;
+    return new URL(window.location.href).searchParams.get("v") || null;
 }
 
 function formatCount(n) {
     if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+    if (n >= 1_000_000)     return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1_000)         return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
     return n.toLocaleString();
 }
 
-async function fetchDislikes(videoId) {
-    try {
-        const res = await fetch(API_BASE + videoId);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        return typeof data.dislikes === "number" ? data.dislikes : null;
-    } catch (e) {
-        console.warn("[RYD] Failed to fetch dislikes:", e.message);
-        return null;
-    }
+// Wait until ytd-watch-flexy (or ytd-watch-grid) has the video-id attribute set.
+// This is the reliable signal that YouTube has fully loaded the new video into its
+// Polymer components — before this, the buttons may still belong to the old video.
+function isVideoLoaded(videoId) {
+    return (
+        document.querySelector(`ytd-watch-flexy[video-id='${videoId}']`) !== null ||
+        document.querySelector(`ytd-watch-grid[video-id='${videoId}']`)  !== null
+    );
 }
 
-// ── Find the dislike button robustly ─────────────────────────────────────────
-// Primary: dislike-button-view-model is a stable custom element in YouTube's
-// modern segmented like/dislike UI. Fallback to aria-label search.
+// ── Button finding (matching official RYD selectors) ─────────────────────────
 
-function findDislikeButton() {
-    // ✅ Most reliable: the custom element wrapping the dislike button
-    const dislikeVM = document.querySelector("dislike-button-view-model");
-    if (dislikeVM) {
-        const btn = dislikeVM.querySelector("button");
-        if (btn) return btn;
+function getButtonsContainer() {
+    if (document.getElementById("menu-container")?.offsetParent === null) {
+        return (
+            document.querySelector("ytd-menu-renderer.ytd-watch-metadata > div") ??
+            document.querySelector("ytd-menu-renderer.ytd-video-primary-info-renderer > div")
+        );
     }
+    return document.getElementById("menu-container")
+        ?.querySelector("#top-level-buttons-computed") ?? null;
+}
 
-    // Fallback: any button whose aria-label contains "dislike"
-    const allButtons = document.querySelectorAll("button");
-    for (const btn of allButtons) {
-        const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-        if (label.includes("dislike") && !label.includes("not interested")) return btn;
+function getDislikeButton() {
+    const buttons = getButtonsContainer();
+    if (!buttons) return null;
+
+    // Modern segmented layout
+    if (buttons.children[0]?.tagName === "YTD-SEGMENTED-LIKE-DISLIKE-BUTTON-RENDERER") {
+        return document.querySelector("#segmented-dislike-button")
+            ?? buttons.children[0].children[1]
+            ?? null;
     }
+    // Newer view-model layout
+    if (buttons.querySelector("segmented-like-dislike-button-view-model")) {
+        return buttons.querySelector("dislike-button-view-model") ?? null;
+    }
+    // Fallback
+    return buttons.children[1] ?? null;
+}
 
+// Get or create the text <span> inside the dislike button
+function getDislikeTextContainer() {
+    const btn = getDislikeButton();
+    if (!btn) return null;
+
+    const existing =
+        btn.querySelector("#text") ??
+        btn.getElementsByTagName("yt-formatted-string")[0] ??
+        btn.querySelector("span[role='text']");
+    if (existing) return existing;
+
+    // Button text element doesn't exist yet — create one
+    const span = document.createElement("span");
+    span.id = "text";
+    span.style.marginLeft = "6px";
+    const innerBtn = btn.querySelector("button");
+    if (innerBtn) {
+        innerBtn.appendChild(span);
+        innerBtn.style.width = "auto";
+        return span;
+    }
     return null;
 }
 
-// ── Inject the count inside the button ───────────────────────────────────────
-// The dislike button starts as --icon-button (icon-only, no text).
-// We swap it to --icon-leading (icon + text) to match the like button layout,
-// then insert a text-content div inside the <button> element itself.
+// ── State ─────────────────────────────────────────────────────────────────────
 
-async function insertDislikeCount(videoId) {
-    const dislikes = await fetchDislikes(videoId);
-    if (dislikes === null) return;
+let currentVideoId   = null;
+let cachedCount      = null;
+let fetchInProgress  = false;
+let checksSinceReset = 0;  // fallback: stop waiting for isVideoLoaded() after ~5s
 
-    // Retry finding the button up to 10 times over 5 seconds
-    let button = null;
-    for (let attempt = 0; attempt < 10; attempt++) {
-        button = findDislikeButton();
-        if (button) break;
-        await new Promise(r => setTimeout(r, 500));
+// ── Fetch ─────────────────────────────────────────────────────────────────────
+
+async function fetchDislikes(videoId) {
+    if (fetchInProgress) return;
+    fetchInProgress = true;
+    try {
+        const res  = await fetch(API_BASE + videoId);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        // Only store the result if this is still the active video
+        if (currentVideoId === videoId && typeof data.dislikes === "number") {
+            cachedCount = data.dislikes;
+        }
+    } catch (e) {
+        console.warn("[RYD] Fetch failed:", e.message);
+    } finally {
+        fetchInProgress = false;
     }
+}
 
-    if (!button) {
-        console.warn("[RYD] Could not find dislike button.");
+// ── Core check (runs every 111 ms) ───────────────────────────────────────────
+
+function checkAndInject() {
+    const videoId = getVideoId();
+
+    // ── Not on a watch page ───────────────────────────────────────────────────
+    if (!videoId) {
+        currentVideoId  = null;
+        cachedCount     = null;
+        fetchInProgress = false;
         return;
     }
 
-    // Switch the button from icon-only to icon+text so it has room to show the count
-    button.classList.replace(
-        "yt-spec-button-shape-next--icon-button",
-        "yt-spec-button-shape-next--icon-leading"
-    );
-
-    // Find or create the count div INSIDE the button (before touch-feedback)
-    let countDiv = button.querySelector(`.${COUNT_CLASS}`);
-    if (!countDiv) {
-        countDiv = document.createElement("div");
-        // Use YouTube's own text-content class so font/spacing matches the like count
-        countDiv.className = `${TEXT_CLASS} ${COUNT_CLASS}`;
-
-        // Insert before the touch-feedback shape (last child), after the icon div
-        const touchFeedback = button.querySelector("yt-touch-feedback-shape");
-        button.insertBefore(countDiv, touchFeedback || null);
+    // ── New video detected ────────────────────────────────────────────────────
+    if (videoId !== currentVideoId) {
+        currentVideoId   = videoId;
+        cachedCount      = null;
+        fetchInProgress  = false;
+        checksSinceReset = 0;
+        fetchDislikes(videoId);  // kick off fetch immediately
+        return;
     }
 
-    countDiv.textContent = formatCount(dislikes);
-    button.title = `${dislikes.toLocaleString()} dislikes`;
-}
+    checksSinceReset++;
 
-// ── SPA Navigation Watcher ────────────────────────────────────────────────────
-// YouTube is a SPA — it does NOT do full page reloads between videos.
-// We watch the <title> element for changes as a reliable navigation signal,
-// plus a URL-polling fallback.
+    // Wait for YouTube to load the video into its components.
+    // Allow up to ~5 s (≈45 checks) before giving up on this gate.
+    if (!isVideoLoaded(videoId) && checksSinceReset < 45) return;
 
-let lastVideoId = null;
+    // Need button container to be visible (offsetParent !== null)
+    const buttons = getButtonsContainer();
+    if (!buttons?.offsetParent && checksSinceReset < 45) return;
 
-function handleNavigation() {
-    const videoId = getVideoId();
-    if (!videoId || videoId === lastVideoId) return;
+    // No count yet  — wait for fetch
+    if (cachedCount === null) return;
 
-    lastVideoId = videoId;
+    // ── Try to inject / keep injected ────────────────────────────────────────
+    const textContainer = getDislikeTextContainer();
+    if (!textContainer) return;
 
-    // Remove any stale count from the previous video and restore the button class
-    document.querySelectorAll(`.${COUNT_CLASS}`).forEach(el => el.remove());
-    const prevBtn = findDislikeButton();
-    if (prevBtn) {
-        prevBtn.classList.replace(
-            "yt-spec-button-shape-next--icon-leading",
-            "yt-spec-button-shape-next--icon-button"
-        );
-        prevBtn.title = "";
+    const formatted = formatCount(cachedCount);
+    if (textContainer.innerText !== formatted) {
+        textContainer.innerText = formatted;
+        console.log("[RYD] Dislike count set:", cachedCount);
     }
-
-    // Wait a tick for the new video's DOM to settle, then inject
-    setTimeout(() => insertDislikeCount(videoId), 800);
 }
 
-// Watch <title> changes — fires on every YouTube SPA navigation
-const titleObserver = new MutationObserver(handleNavigation);
-const titleEl = document.querySelector("title");
-if (titleEl) {
-    titleObserver.observe(titleEl, { childList: true });
+// ── Navigation event ──────────────────────────────────────────────────────────
+// Reset state on navigation so checkAndInject picks up the new video immediately.
+
+function onNavigate() {
+    currentVideoId   = null;   // force new-video branch in checkAndInject
+    cachedCount      = null;
+    fetchInProgress  = false;
+    checksSinceReset = 0;
+    checkAndInject();          // run one tick right now
 }
 
-// Also watch for yt-navigate-finish custom events (fired by YouTube's own router)
-window.addEventListener("yt-navigate-finish", handleNavigation);
+// 'yt-navigate-finish' is dispatched by YouTube's Polymer router on ytd-app,
+// bubbles to document.  The capture=true flag on window is used by the official
+// RYD extension and gives us the earliest possible callback.
+window.addEventListener("yt-navigate-finish", onNavigate, true);
+document.addEventListener("yt-navigate-finish", onNavigate);   // belt-and-suspenders
 
-// Fallback URL poller (catches cases the above might miss)
-setInterval(handleNavigation, 2000);
+// ── Fast poller ───────────────────────────────────────────────────────────────
+// 111 ms matches the official extension. Handles cases where yt-navigate-finish
+// is not received (e.g. Firefox sandbox), re-renders that wipe our count, etc.
+setInterval(checkAndInject, 111);
 
-// Run immediately for the initial page load
-handleNavigation();
+// ── Initial run ───────────────────────────────────────────────────────────────
+checkAndInject();
